@@ -1,0 +1,82 @@
+"""
+FASE 3C — Avaliação e Teste do Modelo YOLOv8 Treinado
+TCC: Sistema de Recomendação de Tamanho para Vestuário Superior
+
+Executa após treinar_yolo.py.
+Gera métricas detalhadas e testa o modelo em imagens novas.
+"""
+
+import os
+from pathlib import Path
+from ultralytics import YOLO
+import torch
+
+BASE_DIR    = Path(__file__).parent.parent
+DATASET_DIR = BASE_DIR / "data" / "deepfashion"
+YAML_FIXED  = DATASET_DIR / "data_fixed.yaml"
+MODELO_PATH = BASE_DIR / "yolo" / "runs" / "clothing_yolov8s_v1" / "weights" / "best.pt"
+DOCS_DIR    = BASE_DIR / "docs" / "plots"
+
+def avaliar():
+    print("=" * 60)
+    print("  AVALIAÇÃO DO MODELO YOLOV8 TREINADO")
+    print("=" * 60)
+
+    if not MODELO_PATH.exists():
+        print(f"\n  Modelo não encontrado em: {MODELO_PATH}")
+        print("     Execute primeiro: python yolo/treinar_yolo.py")
+        return
+
+    print(f"\n  Carregando modelo: {MODELO_PATH}")
+    model = YOLO(str(MODELO_PATH))
+
+    # ── Avaliação no conjunto de validação ────────────────────
+    print("\n[1/2] Avaliando no conjunto de validação...")
+    metrics = model.val(
+        data   = str(YAML_FIXED),
+        imgsz  = 640,
+        device = 0,
+        verbose= True,
+    )
+
+    print("\n" + "=" * 60)
+    print("  MÉTRICAS DE AVALIAÇÃO")
+    print("=" * 60)
+    print(f"  mAP50      : {metrics.box.map50:.3f}")
+    print(f"  mAP50-95   : {metrics.box.map:.3f}")
+    print(f"  Precisão   : {metrics.box.mp:.3f}")
+    print(f"  Recall     : {metrics.box.mr:.3f}")
+
+    # ── Teste em imagens do conjunto de teste ─────────────────
+    print("\n[2/2] Testando em imagens do conjunto de teste...")
+    test_images = list((DATASET_DIR / "test" / "images").glob("*.jpg"))[:5]
+
+    if test_images:
+        results = model.predict(
+            source     = [str(img) for img in test_images],
+            imgsz      = 640,
+            device     = 0,
+            conf       = 0.25,   # confiança mínima para detecção
+            save       = True,
+            project    = str(BASE_DIR / "yolo" / "runs"),
+            name       = "testes_visuais",
+            exist_ok   = True,
+        )
+
+        print(f"\n  Resultados visuais salvos em:")
+        print(f"     yolo/runs/testes_visuais/")
+        print(f"\n  Detecções nas 5 imagens de teste:")
+        for i, (img, result) in enumerate(zip(test_images, results)):
+            boxes = result.boxes
+            if boxes is not None and len(boxes) > 0:
+                classes_detectadas = [result.names[int(c)] for c in boxes.cls]
+                print(f"     [{i+1}] {img.name[:40]}")
+                print(f"          → {classes_detectadas}")
+            else:
+                print(f"     [{i+1}] {img.name[:40]} → nenhuma detecção")
+
+    print("\n Avaliação concluída!")
+    print("=" * 60)
+
+if __name__ == "__main__":
+    avaliar()
