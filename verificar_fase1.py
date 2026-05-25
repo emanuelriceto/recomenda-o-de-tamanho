@@ -1,64 +1,100 @@
 """
-Verificação completa do Banco de Dados — Fase 1
-Executa após create_db, size_charts e load_ansur para confirmar integridade.
+Verificação completa do Banco de Dados — com Modelagem
+Executa após create_db, size_charts e load_ansur.
 """
 
 import sqlite3
 import os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'database/antropometrico.db')
+DB_PATH = os.path.join(os.path.dirname(__file__), "database/antropometrico.db")
 
 
 def verificar_banco():
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
+    cur  = conn.cursor()
 
-    print("=" * 60)
-    print("  VERIFICAÇÃO DO BANCO ANTROPOMÉTRICO — FASE 1")
-    print("=" * 60)
+    print("="*60)
+    print("  VERIFICAÇÃO DO BANCO ANTROPOMÉTRICO")
+    print("="*60)
 
-    tabelas = ["marcas", "tabela_tamanhos", "medidas_corporais", "clientes", "recomendacoes"]
+    # Contagem de registros
+    tabelas = ["marcas", "tabela_tamanhos",
+               "medidas_corporais", "clientes", "recomendacoes"]
     for tabela in tabelas:
         cur.execute(f"SELECT COUNT(*) FROM {tabela}")
         count = cur.fetchone()[0]
-        status = "✅" if count > 0 or tabela in ("clientes", "recomendacoes") else "❌"
-        print(f"  {status}  {tabela:<22} {count} registros")
+        ok = "✅" if count > 0 or tabela in ("clientes","recomendacoes") else "❌"
+        print(f"  {ok}  {tabela:<22} {count} registros")
 
-    print("\n📋 Marcas cadastradas:")
+    # Marcas cadastradas
+    print("\n📋 Marcas:")
     cur.execute("SELECT nome, sistema_tamanho FROM marcas ORDER BY nome")
     for row in cur.fetchall():
         print(f"     • {row[0]} ({row[1]})")
 
-    print("\n📐 Exemplo de consulta — busto 100cm, altura 178cm:")
+    # Entradas por modelagem
+    print("\n📐 Entradas por modelagem:")
     cur.execute("""
-        SELECT m.nome, t.tamanho_label, t.busto_corpo_min, t.busto_corpo_max
-        FROM tabela_tamanhos t JOIN marcas m ON m.id = t.marca_id
-        WHERE 100 BETWEEN t.busto_corpo_min AND t.busto_corpo_max
-          AND 178 BETWEEN t.altura_min AND t.altura_max
+        SELECT modelagem, COUNT(*) as n
+        FROM tabela_tamanhos
+        GROUP BY modelagem
+        ORDER BY modelagem
+    """)
+    for row in cur.fetchall():
+        print(f"     {row[0]:<12} → {row[1]} entradas")
+
+    # Exemplo de consulta com modelagem
+    print("\n🔍 Exemplo: busto=94cm, altura=175cm, modelagem=slim")
+    cur.execute("""
+        SELECT m.nome, t.tamanho_label, t.modelagem,
+               t.busto_corpo_min, t.busto_corpo_max
+        FROM tabela_tamanhos t
+        JOIN marcas m ON m.id = t.marca_id
+        WHERE 94 BETWEEN t.busto_corpo_min AND t.busto_corpo_max
+          AND 175 BETWEEN t.altura_min AND t.altura_max
+          AND t.modelagem = 'slim'
         ORDER BY m.nome
     """)
     for row in cur.fetchall():
-        print(f"     {row[0]:<12} → {row[1]} (busto aceito: {row[2]}–{row[3]} cm)")
+        print(f"     {row[0]:<12} → {row[1]} "
+              f"(busto aceito: {row[3]}–{row[4]} cm)")
 
-    print("\n📊 Medidas corporais — resumo estatístico:")
+    # Exemplo regular para comparar
+    print("\n🔍 Mesmo cliente, modelagem=regular:")
     cur.execute("""
-        SELECT
-            genero,
-            COUNT(*) as n,
-            ROUND(AVG(altura), 1) as alt_media,
-            ROUND(AVG(busto_circunf), 1) as busto_medio,
-            ROUND(AVG(largura_ombro), 1) as ombro_medio
+        SELECT m.nome, t.tamanho_label, t.modelagem,
+               t.busto_corpo_min, t.busto_corpo_max
+        FROM tabela_tamanhos t
+        JOIN marcas m ON m.id = t.marca_id
+        WHERE 94 BETWEEN t.busto_corpo_min AND t.busto_corpo_max
+          AND 175 BETWEEN t.altura_min AND t.altura_max
+          AND t.modelagem = 'regular'
+        ORDER BY m.nome
+    """)
+    for row in cur.fetchall():
+        print(f"     {row[0]:<12} → {row[1]} "
+              f"(busto aceito: {row[3]}–{row[4]} cm)")
+
+    # Medidas corporais
+    print("\n📊 Medidas corporais:")
+    cur.execute("""
+        SELECT genero, COUNT(*) as n,
+               ROUND(AVG(altura),1) as alt,
+               ROUND(AVG(busto_circunf),1) as busto,
+               ROUND(AVG(largura_ombro),1) as ombro
         FROM medidas_corporais
         GROUP BY genero
     """)
-    print(f"  {'Gênero':<8} {'N':<6} {'Altura média':<15} {'Busto médio':<14} {'Ombro médio'}")
-    print("  " + "-" * 52)
+    print(f"  {'Gênero':<8} {'N':<6} {'Altura':<10} "
+          f"{'Busto':<10} {'Ombro'}")
+    print("  " + "-"*45)
     for row in cur.fetchall():
-        print(f"  {row[0]:<8} {row[1]:<6} {row[2]} cm{'':<8} {row[3]} cm{'':<6} {row[4]} cm")
+        print(f"  {row[0]:<8} {row[1]:<6} {row[2]} cm{'':<5} "
+              f"{row[3]} cm{'':<3} {row[4]} cm")
 
     conn.close()
-    print("\n✅ Fase 1 concluída com sucesso! Banco pronto para a Fase 2 (modelo ML).")
-    print("=" * 60)
+    print("\n✅ Banco verificado com sucesso!")
+    print("="*60)
 
 
 if __name__ == "__main__":
