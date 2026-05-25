@@ -1,46 +1,82 @@
 """
-FASE 3C — Treinamento do YOLOv8 para Detecção de Camisetas
+FASE 3C — Treinamento do YOLOv8 para Detecção de Modelagem de Camisetas
 TCC: Sistema de Recomendação de Tamanho para Vestuário Superior
 
-Dataset: Clothing Detection (Roboflow) — 3.094 imagens, 16 classes
-GPU: NVIDIA GeForce RTX 4060 Ti (8GB VRAM)
-Modelo base: YOLOv8s (small) — melhor equilíbrio velocidade/precisão para 8GB
+ATUALIZAÇÃO: 5 classes definitivas de modelagem de camiseta manga curta:
+  0 → regular
+  1 → slim
+  2 → oversized
+  3 → longline
+  4 → henley
 
-Classes de interesse para o TCC (vestuário superior masculino):
-  - Shirt, Long Shirt, SleevelessShirt, Hoodie, Jacket, Short, Male
+Dataset: coletado manualmente nos sites de e-commerce
+  (Hering, Renner, Zara, C&A, Reserva)
+  ~400-500 imagens de produto (fundo branco, sem corpo)
+  Anotado no Roboflow e exportado no formato YOLOv8
+
+Execute APÓS fazer upload e anotação no Roboflow.
 """
 
 import os
 import yaml
-import shutil
 from pathlib import Path
 from ultralytics import YOLO
 import torch
 
-# ── Verificar GPU ────────────────────────────────────────────
-print("=" * 60)
-print("  FASE 3C — Treinamento YOLOv8")
-print("=" * 60)
-print(f"\n  GPU disponível : {torch.cuda.is_available()}")
-print(f"  Dispositivo    : {torch.cuda.get_device_name(0)}")
-print(f"  VRAM           : {round(torch.cuda.get_device_properties(0).total_memory / 1024**3, 1)} GB")
-
-# ── Caminhos ─────────────────────────────────────────────────
 BASE_DIR    = Path(__file__).parent.parent
 DATASET_DIR = BASE_DIR / "data" / "deepfashion"
 YAML_PATH   = DATASET_DIR / "data.yaml"
 YAML_FIXED  = DATASET_DIR / "data_fixed.yaml"
 RUNS_DIR    = BASE_DIR / "yolo" / "runs"
 
-# ── Corrigir data.yaml com caminhos absolutos ────────────────
+# ── Classes definitivas do TCC ────────────────────────────────
+CLASSES_MODELAGEM = [
+    "regular",    # 0 — caimento padrão
+    "slim",       # 1 — corte mais justo
+    "oversized",  # 2 — propositalmente largo
+    "longline",   # 3 — comprimento estendido
+    "henley",     # 4 — gola com botões
+]
+
+
+def verificar_dataset():
+    """Verifica se o dataset está no lugar certo e bem estruturado."""
+    if not DATASET_DIR.exists():
+        print(f"\n  ❌ Pasta do dataset não encontrada: {DATASET_DIR}")
+        print("     Faça o download do Roboflow primeiro:")
+        print("     python -c \"from roboflow import Roboflow; ...\"")
+        return False
+
+    for split in ["train", "valid", "test"]:
+        img_dir = DATASET_DIR / split / "images"
+        lbl_dir = DATASET_DIR / split / "labels"
+        if not img_dir.exists() or not lbl_dir.exists():
+            print(f"  ❌ Split '{split}' incompleto")
+            return False
+        n_imgs = len(list(img_dir.glob("*.jpg")))
+        print(f"   ✓ {split:<6}: {n_imgs} imagens")
+
+    if not YAML_PATH.exists():
+        print(f"  ❌ data.yaml não encontrado em {YAML_PATH}")
+        return False
+
+    return True
+
+
 def corrigir_yaml():
-    """
-    O data.yaml original usa caminhos relativos (../train/images)
-    que não funcionam no Windows com YOLOv8. Criamos uma versão
-    com caminhos absolutos.
-    """
-    with open(YAML_PATH, "r") as f:
+    """Cria data_fixed.yaml com caminhos absolutos e classes corretas."""
+    with open(YAML_PATH) as f:
         config = yaml.safe_load(f)
+
+    # Verificar se as classes do dataset batem com as esperadas
+    classes_dataset = config.get("names", [])
+    print(f"\n   Classes no dataset: {classes_dataset}")
+    print(f"   Classes esperadas:  {CLASSES_MODELAGEM}")
+
+    if sorted(classes_dataset) != sorted(CLASSES_MODELAGEM):
+        print("\n   ⚠️  As classes do dataset não correspondem às esperadas.")
+        print("      Verifique se anotou corretamente no Roboflow.")
+        print("      Continuando com as classes do dataset...")
 
     config["path"]  = str(DATASET_DIR.resolve())
     config["train"] = str((DATASET_DIR / "train" / "images").resolve())
@@ -50,111 +86,76 @@ def corrigir_yaml():
     with open(YAML_FIXED, "w") as f:
         yaml.dump(config, f, allow_unicode=True, sort_keys=False)
 
-    print(f"\n  ✓ data_fixed.yaml criado com caminhos absolutos")
-    print(f"    train : {config['train']}")
-    print(f"    val   : {config['val']}")
-    print(f"    nc    : {config['nc']} classes")
-    print(f"    names : {config['names']}")
+    print(f"\n   ✓ data_fixed.yaml criado")
+    return str(YAML_FIXED), config
 
-    return str(YAML_FIXED)
 
-# ── Configurações de treino ───────────────────────────────────
-# Otimizadas para RTX 4060 Ti (8GB VRAM)
-CONFIG_TREINO = {
-    # Modelo base — 'yolov8s.pt' é o ponto de partida pré-treinado no COCO
-    # s = small: bom equilíbrio entre velocidade e precisão para 8GB VRAM
-    "model":     "yolov8s.pt",
-
-    # Épocas — quantas vezes o modelo vê todo o dataset
-    # 50 épocas é suficiente para fine-tuning com dataset de 3k imagens
-    "epochs":    50,
-
-    # Tamanho da imagem — 640x640 é o padrão do YOLOv8
-    "imgsz":     640,
-
-    # Batch size — quantas imagens por vez na GPU
-    # 16 é seguro para 8GB VRAM com yolov8s
-    "batch":     16,
-
-    # Dispositivo — 0 = primeira GPU (RTX 4060 Ti)
-    "device":    0,
-
-    # Workers — threads para carregar dados
-    "workers":   4,
-
-    # Paciência para early stopping
-    # Para o treino se não melhorar por 15 épocas consecutivas
-    "patience":  15,
-
-    # Nome do experimento (pasta onde salva resultados)
-    "name":      "clothing_yolov8s_v1",
-
-    # Diretório de saída
-    "project":   str(RUNS_DIR),
-
-    # Otimizações de performance
-    "cache":     False,   # False = não usa RAM para cache (mais seguro)
-    "amp":       True,    # True = mixed precision (mais rápido na RTX)
-    "exist_ok":  True,    # Permite reescrever experimento existente
-    "verbose":   True,    # Mostrar logs detalhados
-}
-
-# ── Executar treino ───────────────────────────────────────────
 def treinar():
-    print("\n[1/3] Corrigindo data.yaml...")
-    yaml_path = corrigir_yaml()
+    print("\n" + "="*60)
+    print("  FASE 3C — Treinamento YOLOv8 (Modelagens de Camiseta)")
+    print("="*60)
 
-    print("\n[2/3] Carregando modelo base YOLOv8s...")
-    model = YOLO(CONFIG_TREINO["model"])
-    print("      ✓ Modelo carregado")
+    # Verificar GPU
+    print(f"\n  GPU  : {torch.cuda.get_device_name(0)}")
+    print(f"  VRAM : {round(torch.cuda.get_device_properties(0).total_memory/1024**3,1)} GB")
 
-    print(f"\n[3/3] Iniciando treino...")
-    print(f"      Épocas   : {CONFIG_TREINO['epochs']}")
-    print(f"      Batch    : {CONFIG_TREINO['batch']}")
-    print(f"      Imagem   : {CONFIG_TREINO['imgsz']}x{CONFIG_TREINO['imgsz']}")
-    print(f"      GPU      : RTX 4060 Ti")
-    print(f"      Saída    : {RUNS_DIR}/clothing_yolov8s_v1/")
-    print("\n  ⏱️  Tempo estimado: 20–40 minutos para 50 épocas")
-    print("     (você verá o progresso época por época abaixo)\n")
-    print("=" * 60)
+    # Verificar dataset
+    print("\n[1/4] Verificando dataset...")
+    if not verificar_dataset():
+        return
+
+    # Corrigir YAML
+    print("\n[2/4] Configurando data.yaml...")
+    yaml_path, config = corrigir_yaml()
+    print(f"      Classes: {config.get('names', [])}")
+    print(f"      nc     : {config.get('nc', '?')}")
+
+    # Carregar modelo base
+    print("\n[3/4] Carregando YOLOv8s pré-treinado...")
+    model = YOLO("yolov8s.pt")
+    print("      ✓ yolov8s.pt carregado")
+
+    # Treinar
+    print(f"\n[4/4] Iniciando treino...")
+    print(f"      Épocas  : 50")
+    print(f"      Batch   : 16")
+    print(f"      Imagem  : 640×640")
+    print(f"      Classes : {CLASSES_MODELAGEM}")
+    print(f"      ⏱️  Estimativa: 15–30 min na RTX 4060 Ti\n")
+    print("="*60)
 
     results = model.train(
-        data    = yaml_path,
-        epochs  = CONFIG_TREINO["epochs"],
-        imgsz   = CONFIG_TREINO["imgsz"],
-        batch   = CONFIG_TREINO["batch"],
-        device  = CONFIG_TREINO["device"],
-        workers = CONFIG_TREINO["workers"],
-        patience= CONFIG_TREINO["patience"],
-        name    = CONFIG_TREINO["name"],
-        project = CONFIG_TREINO["project"],
-        cache   = CONFIG_TREINO["cache"],
-        amp     = CONFIG_TREINO["amp"],
-        exist_ok= CONFIG_TREINO["exist_ok"],
-        verbose = CONFIG_TREINO["verbose"],
+        data     = yaml_path,
+        epochs   = 50,
+        imgsz    = 640,
+        batch    = 16,
+        device   = 0,
+        workers  = 4,
+        patience = 15,
+        name     = "camisetas_modelagem_v1",
+        project  = str(RUNS_DIR),
+        amp      = True,
+        exist_ok = True,
+        verbose  = True,
     )
 
-    # ── Resultados finais ─────────────────────────────────────
-    print("\n" + "=" * 60)
+    # Resultados
+    modelo_final = RUNS_DIR / "camisetas_modelagem_v1" / "weights" / "best.pt"
+    print("\n" + "="*60)
     print("  TREINO CONCLUÍDO!")
-    print("=" * 60)
+    print("="*60)
 
-    modelo_salvo = RUNS_DIR / "clothing_yolov8s_v1" / "weights" / "best.pt"
-    if modelo_salvo.exists():
-        print(f"\n  ✅ Melhor modelo salvo em:")
-        print(f"     {modelo_salvo}")
+    if modelo_final.exists():
+        print(f"\n  ✅ Modelo salvo em:")
+        print(f"     {modelo_final}")
         print(f"\n  📊 Métricas finais:")
-        print(f"     mAP50    : {results.results_dict.get('metrics/mAP50(B)', 'N/A'):.3f}")
-        print(f"     mAP50-95 : {results.results_dict.get('metrics/mAP50-95(B)', 'N/A'):.3f}")
-        print(f"     Precisão : {results.results_dict.get('metrics/precision(B)', 'N/A'):.3f}")
-        print(f"     Recall   : {results.results_dict.get('metrics/recall(B)', 'N/A'):.3f}")
-    else:
-        print("Modelo não encontrado no caminho esperado.")
+        print(f"     mAP50    : {results.results_dict.get('metrics/mAP50(B)', 0):.3f}")
+        print(f"     mAP50-95 : {results.results_dict.get('metrics/mAP50-95(B)', 0):.3f}")
+        print(f"     Precisão : {results.results_dict.get('metrics/precision(B)', 0):.3f}")
+        print(f"     Recall   : {results.results_dict.get('metrics/recall(B)', 0):.3f}")
 
-    print("\n  Próximo passo: python yolo/avaliar_yolo.py")
-    print("=" * 60)
-
-    return results
+    print("\n  Próximo: python yolo/avaliar_yolo.py")
+    print("="*60)
 
 
 if __name__ == "__main__":
