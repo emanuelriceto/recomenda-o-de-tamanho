@@ -1,29 +1,76 @@
 # 🧥 Sistema de Recomendação de Tamanho para Vestuário Superior
 
-> **TCC** — Desenvolvimento de um Sistema de Recomendação de Tamanho para Vestuário Superior em E-Commerce Visando a Redução de Incerteza na Escolha de Peças
+> **TCC — PUCPR · Escola Politécnica · Engenharia de Computação**
+>
+> Desenvolvimento de um Sistema de Recomendação de Tamanho para Vestuário Superior em E-Commerce Visando a Redução de Incerteza na Escolha de Peças
 
-[![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.13-blue)](https://python.org)
 [![XGBoost](https://img.shields.io/badge/XGBoost-2.0-orange)](https://xgboost.readthedocs.io)
+[![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics%208.4-purple)](https://ultralytics.com)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111-green)](https://fastapi.tiangolo.com)
 [![SQLite](https://img.shields.io/badge/SQLite-3-lightblue)](https://sqlite.org)
-[![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-purple)](https://ultralytics.com)
+[![License](https://img.shields.io/badge/Dataset-CC%20BY%204.0-yellow)](https://creativecommons.org/licenses/by/4.0/)
 
 ---
 
 ## 📌 Sobre o Projeto
 
-O e-commerce de moda enfrenta altas taxas de devolução causadas por erro de tamanho — o cliente não consegue saber, antes da compra, se a peça vai servir. Este projeto desenvolve um sistema inteligente que recebe as medidas corporais do cliente e recomenda o tamanho correto de camiseta, por marca, com uma estimativa de confiança.
+O e-commerce de moda enfrenta altas taxas de devolução causadas por erro de tamanho — estima-se que entre **25% e 40%** das compras online de roupas sejam devolvidas, sendo **31%** por problemas de ajuste e caimento (Shopify, 2024). Em 2022, apenas nos EUA, isso representou **US$ 212 bilhões** em devoluções (BBC News, 2023).
 
-**Escopo atual:** vestuário superior masculino (camisetas). O sistema foi projetado para expansão futura ao público feminino após coleta de dados representativos.
+Este projeto desenvolve um sistema inteligente que resolve esse problema combinando dois modelos de IA:
 
-O sistema é composto por quatro módulos:
+1. **YOLOv8** — detecta a modelagem da camiseta na foto enviada pelo cliente (oversized, regular ou slim)
+2. **XGBoost** — recomenda o tamanho correto cruzando as medidas corporais do cliente com a modelagem detectada e as size charts das marcas
 
-| Módulo | Tecnologia | Status |
-|---|---|---|
-| Banco de Dados Antropométrico | SQLite | ✅ Concluído |
-| Modelo de Machine Learning | XGBoost | ✅ Concluído |
-| Visão Computacional | YOLOv8 + DeepFashion | 🔄 Em desenvolvimento |
-| API REST | FastAPI | ⏳ Planejado |
+### Escopo atual
+- **Vestuário:** camisetas masculinas de manga curta
+- **Modelagens:** oversized · regular · slim
+- **Marcas:** Hering · Renner · Reserva · C&A · Zara
+- **Público:** masculino adulto
+
+---
+
+## 🔄 Como o Sistema Funciona
+
+```
+Cliente informa:
+  ├── Medidas corporais (busto, ombro, altura, peso)
+  └── Foto da camiseta que pretende comprar
+           │
+           ▼
+    ┌─────────────┐
+    │   YOLOv8    │  → Detecta a modelagem
+    │  (Fase 3)   │    (oversized / regular / slim)
+    └──────┬──────┘
+           │ modelagem detectada
+           ▼
+    ┌─────────────┐     ┌──────────────────────┐
+    │   XGBoost   │ ←── │  Banco de Dados       │
+    │  (Fase 2)   │     │  Size Charts + ANSUR  │
+    └──────┬──────┘     └──────────────────────┘
+           │
+           ▼
+    Tamanho recomendado
+    + Confiança (%)
+    + Alternativas
+    + Medidas reais da peça
+```
+
+**Exemplo de resposta:**
+```json
+{
+  "tamanho_recomendado": "M",
+  "confianca": 0.94,
+  "modelagem_detectada": "regular",
+  "confianca_yolo": 0.95,
+  "marca_referencia": "Hering",
+  "alternativas": [
+    {"tamanho": "M",  "probabilidade": 0.940},
+    {"tamanho": "G",  "probabilidade": 0.058},
+    {"tamanho": "P",  "probabilidade": 0.002}
+  ]
+}
+```
 
 ---
 
@@ -33,29 +80,35 @@ O sistema é composto por quatro módulos:
 recomenda-o-de-tamanho/
 │
 ├── 📁 database/
-│   └── create_db.py            # Cria o banco SQLite com todas as tabelas
+│   └── create_db.py              # Cria o banco SQLite com 5 tabelas
 │
 ├── 📁 data/
 │   ├── size_charts/
-│   │   └── size_charts_data.py # Size charts de 5 marcas (Hering, Renner, Reserva, C&A, Zara)
+│   │   └── size_charts_data.py   # Size charts: 5 marcas × 3 modelagens = 90 entradas
 │   └── ansur/
-│       ├── load_ansur.py       # Processa e carrega o ANSUR II no banco
+│       ├── load_ansur.py         # Processa e carrega o ANSUR II no banco
 │       └── ANSUR_II_MALE_Public.csv  # Dataset de medidas corporais (4.082 homens)
 │
 ├── 📁 model/
-│   ├── preparar_dados.py       # Engenharia de features + análise exploratória
-│   └── treinar_modelo.py       # Treina, compara e exporta o melhor modelo
+│   ├── preparar_dados.py         # Engenharia de features + análise exploratória
+│   └── treinar_modelo.py         # Treina XGBoost, Random Forest e Regressão Logística
 │
-├── 📁 docs/
-│   └── plots/                  # Gráficos gerados para a monografia (7 imagens)
+├── 📁 yolo/
+│   ├── treinar_yolo.py           # Fine-tuning do YOLOv8s com dataset próprio
+│   ├── avaliar_yolo.py           # Avalia mAP, precisão e recall
+│   └── weights/
+│       └── best.pt               # Modelo YOLOv8 treinado (mAP50 = 0.953)
 │
-├── 📁 api/                     # API REST — FastAPI (Fase 4, em breve)
-├── 📁 notebooks/               # Análises exploratórias em Jupyter
-├── 📁 scripts/                 # Scripts auxiliares
+├── 📁 api/
+│   ├── main.py                   # API REST — FastAPI com 5 endpoints
+│   └── testar_api.py             # Script de testes automáticos
 │
-├── requirements.txt            # Dependências Python
-├── setup_ambiente.ps1          # Configuração automática do ambiente (Windows)
-└── verificar_fase1.py          # Verifica integridade do banco de dados
+├── 📁 docs/plots/                # Gráficos gerados para a monografia
+├── 📁 notebooks/                 # Análises exploratórias
+│
+├── requirements.txt              # Dependências Python (venv principal)
+├── setup_ambiente.ps1            # Configuração automática do ambiente (Windows)
+└── verificar_fase1.py            # Verifica integridade do banco de dados
 ```
 
 ---
@@ -63,172 +116,234 @@ recomenda-o-de-tamanho/
 ## 🚀 Como Executar
 
 ### Pré-requisitos
-- Python 3.10 ou superior → [python.org](https://python.org)
-- Git → [git-scm.com](https://git-scm.com/download/win)
-- GPU NVIDIA com CUDA instalado *(necessário apenas para a Fase 3 — YOLO)*
+
+- Python 3.11 e Python 3.13 instalados lado a lado
+- Git
+- GPU NVIDIA com CUDA (para treino do YOLO) — testado com RTX 4060 Ti 8GB
 
 ### 1. Clonar o repositório
 
-```powershell
+```bash
 git clone https://github.com/emanuelriceto/recomenda-o-de-tamanho.git
 cd recomenda-o-de-tamanho
 ```
 
-### 2. Configurar o ambiente virtual (Windows — PowerShell)
-
-Executar apenas **uma vez**:
+### 2. Configurar o ambiente principal (Python 3.13)
 
 ```powershell
-# Liberar execução de scripts no PowerShell (necessário uma única vez)
+# Windows — PowerShell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-
-# Criar ambiente virtual, ativá-lo e instalar todas as dependências
 .\setup_ambiente.ps1
 ```
 
-Para ativar o ambiente nas **próximas vezes** que abrir o terminal:
+Ou manualmente:
 
-```powershell
-.\venv\Scripts\Activate.ps1
+```bash
+python -m venv venv
+source venv/Scripts/activate          # Git Bash
+pip install -r requirements.txt
 ```
+
+### 3. Configurar o ambiente YOLO (Python 3.11)
+
+```bash
+py -3.11 -m venv venv_yolo
+source venv_yolo/Scripts/activate
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 --no-cache-dir
+pip install ultralytics pyyaml --prefer-binary --no-cache-dir
+```
+
+> **Por que dois ambientes?** O PyTorch com suporte CUDA não disponibiliza wheels para Python 3.13 ainda. O venv principal usa Python 3.13 para banco de dados, ML tabular e API. O venv_yolo usa Python 3.11 exclusivamente para o módulo de visão computacional.
 
 ---
 
-### 3. Fase 1 — Banco de Dados Antropométrico
+## 📋 Execução por Fase
 
-Cria o banco SQLite, popula as size charts das marcas e carrega as medidas corporais reais do ANSUR II.
+### Fase 1 — Banco de Dados Antropométrico
 
-```powershell
-python database\create_db.py
-python data\size_charts\size_charts_data.py
-python data\ansur\load_ansur.py
-python verificar_fase1.py
-```
+```bash
+source venv/Scripts/activate
 
-**O que cada script faz:**
-
-| Script | O que faz | Resultado |
-|---|---|---|
-| `create_db.py` | Cria as 5 tabelas do banco | `database/antropometrico.db` |
-| `size_charts_data.py` | Insere 28 tamanhos de 5 marcas | Banco populado com size charts |
-| `load_ansur.py` | Processa o ANSUR II e insere no banco | 4.082 registros corporais reais |
-| `verificar_fase1.py` | Confere integridade e mostra estatísticas | Relatório no terminal |
-
----
-
-### 4. Fase 2 — Modelo de Machine Learning
-
-Prepara o dataset de treinamento, gera gráficos de análise e treina os modelos.
-
-```powershell
-python model\preparar_dados.py
-python model\treinar_modelo.py
+python database/create_db.py           # Cria as 5 tabelas no SQLite
+python data/size_charts/size_charts_data.py  # Popula size charts (90 entradas)
+python data/ansur/load_ansur.py        # Carrega ANSUR II (4.082 registros)
+python verificar_fase1.py              # Verifica integridade e exibe estatísticas
 ```
 
 **O que cada script faz:**
 
-| Script | O que faz | Resultado |
-|---|---|---|
-| `preparar_dados.py` | Une banco + size charts, cria features derivadas, gera 4 gráficos | `model/dataset_treinamento.csv` + gráficos 01 a 04 |
-| `treinar_modelo.py` | Treina 3 modelos, compara, salva o melhor, gera 3 gráficos | `model/modelo_recomendacao.joblib` + gráficos 05 a 07 |
+| Script | Resultado |
+|---|---|
+| `create_db.py` | `database/antropometrico.db` com 5 tabelas |
+| `size_charts_data.py` | 90 entradas (5 marcas × 6 tam médios × 3 modelagens) |
+| `load_ansur.py` | 4.082 registros corporais masculinos reais |
+| `verificar_fase1.py` | Relatório de integridade no terminal |
+
+**Para obter o ANSUR II:**
+1. Acesse: https://www.openicpsr.org/openicpsr/project/116564
+2. Baixe `ANSUR_II_MALE_Public.csv`
+3. Coloque em `data/ansur/`
+
+### Fase 2 — Modelo de Machine Learning (XGBoost)
+
+```bash
+source venv/Scripts/activate
+
+python model/preparar_dados.py   # Prepara dataset e gera gráficos de análise
+python model/treinar_modelo.py   # Treina, compara e exporta o melhor modelo
+```
+
+### Fase 3 — Visão Computacional (YOLOv8)
+
+```bash
+source venv_yolo/Scripts/activate
+
+# Coloque o dataset em data/deepfashion/ antes de rodar
+python yolo/treinar_yolo.py    # Fine-tuning do YOLOv8s
+python yolo/avaliar_yolo.py    # Avaliação e testes visuais
+```
+
+**Estrutura esperada do dataset:**
+```
+data/deepfashion/
+├── data.yaml
+├── train/images/   # ~677 imagens (70%)
+├── valid/images/   # ~81  imagens (20%)
+└── test/images/    # ~40  imagens (10%)
+```
+
+### Fase 4 — API REST (FastAPI)
+
+```bash
+source venv/Scripts/activate
+
+uvicorn api.main:app --reload --port 8000
+```
+
+Documentação interativa: **http://localhost:8000/docs**
 
 ---
 
-## 📊 Resultados — Fase 2 (Modelo ML)
+## 📊 Resultados
 
-### Como as métricas foram calculadas
+### Fase 2 — Modelo XGBoost
 
-Cada modelo foi avaliado com duas estratégias combinadas:
+Dataset de treinamento: ANSUR II masculino (4.082 pessoas × 3 modelagens = **12.246 amostras**).
+Avaliação: cross-validation estratificado 5-fold + holdout de 20%.
 
-**Acurácia CV (Cross-Validation 5-fold):**
-O dataset foi dividido em 5 partes iguais. O modelo foi treinado 5 vezes, cada vez usando 4 partes para treino e 1 parte diferente para teste. A acurácia final é a **média das 5 rodadas** e o `± X%` é o **desvio padrão** — quanto menor, mais estável é o modelo entre diferentes subconjuntos de dados.
+| Modelo | Acurácia CV | F1-Score Teste |
+|---|---|---|
+| **XGBoost ⭐ (selecionado)** | **99,6% ± 0,3%** | **99,8%** |
+| Random Forest | 99,7% ± 0,2% | 99,7% |
+| Regressão Logística | 95,3% ± 0,5% | 95,5% |
 
-**F1-Score Teste:**
-Após o cross-validation, o modelo foi treinado no conjunto completo de treino (80% dos dados) e avaliado em um conjunto de teste separado (20% dos dados, nunca visto durante o treino). O F1-Score combina **precisão** (dos que o modelo disse ser tamanho M, quantos realmente eram M?) e **recall** (de todos os que eram tamanho M, quantos o modelo identificou corretamente?). É mais justo que a acurácia simples quando há classes com quantidades diferentes de amostras.
-
-### Comparativo dos modelos
-
-| Modelo | Acurácia CV | F1-Score Teste | Observação |
-|---|---|---|---|
-| **XGBoost ⭐** | **99.6% ± 0.3%** | **99.8%** | Modelo selecionado |
-| Random Forest | 99.7% ± 0.2% | 99.7% | Robusto, ligeiramente inferior |
-| Regressão Logística | 95.3% ± 0.5% | 95.5% | Simples, usado como baseline |
-
-> **Nota:** Os resultados foram obtidos com o dataset ANSUR II (militares masculinos americanos). A acurácia pode variar quando aplicada à população brasileira — coleta de dados locais está planejada como validação.
-
-### Features utilizadas pelo modelo
+**Features utilizadas (7):**
 
 | Feature | Tipo | Descrição |
 |---|---|---|
-| `busto_circunf` | Medida direta | Circunferência do busto/tórax em cm — **feature mais importante** |
-| `largura_ombro` | Medida direta | Distância biacromial (ombro a ombro) em cm |
-| `altura` | Medida direta | Altura total em cm |
-| `peso_kg` | Medida direta | Peso corporal em kg |
-| `imc` | Derivada | Peso / (Altura²) — índice de massa corporal |
-| `ratio_busto_ombro` | Derivada | Busto ÷ Ombro — proporcionalidade corporal |
-| `genero_num` | Codificada | 1 = Masculino, 0 = Feminino |
-| `cintura_circunf` | Opcional | Circunferência da cintura em cm |
-| `comprimento_braco` | Opcional | Comprimento do braço em cm |
+| `busto_circunf` | Medida direta | Circunferência do busto/tórax (cm) — mais importante |
+| `largura_ombro` | Medida direta | Distância biacromial (cm) |
+| `altura` | Medida direta | Altura total (cm) |
+| `peso_kg` | Medida direta | Peso corporal (kg) |
+| `imc` | Derivada | peso / (altura/100)² |
+| `ratio_busto_ombro` | Derivada | busto ÷ ombro — proporcionalidade corporal |
+| `modelagem_num` | Saída do YOLO | 0=oversized · 1=regular · 2=slim |
+
+> **Nota:** `genero_num` foi removida — o sistema é exclusivamente masculino.
+
+### Fase 3 — YOLOv8
+
+**Dataset próprio** coletado nos sites das marcas cadastradas, anotado no Roboflow.
+- 403 imagens originais → **967 imagens** após data augmentation
+- Distribuição: 70% treino / 20% validação / 10% teste
+- Classes: `oversized` · `regular` · `slim`
+
+| Métrica | Resultado | Critério |
+|---|---|---|
+| **mAP50** | **0.953** | ≥ 0.50 ✅ |
+| mAP50-95 | 0.946 | — |
+| Precisão | 0.971 | — |
+| Recall | 0.931 | — |
+
+**Por classe:**
+
+| Classe | mAP50 | Precisão | Recall |
+|---|---|---|---|
+| regular | 0.995 | 0.971 | 1.000 |
+| oversized | 0.978 | 0.943 | 1.000 |
+| slim | 0.886 | 1.000 | 0.792 |
+
+> O recall menor na classe `slim` é esperado pelo menor número de amostras nessa classe. Coleta adicional de imagens slim está planejada.
 
 ---
 
 ## 🗺️ Roadmap
 
 - [x] **Fase 1** — Banco de Dados Antropométrico
-  - [x] Estrutura do banco SQLite (5 tabelas)
-  - [x] Size charts de 5 marcas (Hering, Renner, Reserva, C&A, Zara)
+  - [x] Banco SQLite com 5 tabelas
+  - [x] Size charts: 5 marcas × 3 modelagens (oversized/regular/slim)
   - [x] Integração com ANSUR II masculino (4.082 registros reais)
 - [x] **Fase 2** — Modelo de Machine Learning
-  - [x] Engenharia de features e análise exploratória
-  - [x] Comparação de modelos (XGBoost, Random Forest, Regressão Logística)
-  - [x] Exportação do modelo treinado
-- [ ] **Fase 3** — Visão Computacional
-  - [ ] Configuração do ambiente CUDA (GPU NVIDIA)
-  - [ ] Fine-tuning do YOLOv8 com DeepFashion
-  - [ ] Extração de keypoints de camisetas em imagens
+  - [x] Pipeline completo de treino e avaliação
+  - [x] XGBoost selecionado — F1-Score: 99,8%
+  - [x] Modelagem como feature (integração YOLO → XGBoost)
+- [x] **Fase 3** — Visão Computacional
+  - [x] Dataset próprio coletado e anotado no Roboflow (967 imagens)
+  - [x] Fine-tuning YOLOv8s — mAP50: 0.953 ✅
+  - [x] Modelo exportado: `yolo/weights/best.pt`
 - [ ] **Fase 4** — API REST (FastAPI)
-  - [ ] Endpoint de recomendação por medidas
-  - [ ] Endpoint de recomendação por foto
-  - [ ] Documentação automática (Swagger)
-- [ ] **Fase 5** — Interface do Cliente
-  - [ ] Formulário web simples (HTML + JavaScript)
-  - [ ] App mobile (implementação futura)
+  - [x] Estrutura dos endpoints implementada
+  - [ ] Integração YOLO + XGBoost no endpoint `/recomendar-por-foto`
+- [ ] **Fase 5** — Interface do Cliente (trabalho futuro)
 
 ---
 
 ## 📚 Datasets e Fontes
 
-| Fonte | Uso no Projeto | Acesso |
+| Fonte | Uso | Acesso |
 |---|---|---|
 | [ANSUR II — US Army](https://www.openicpsr.org/openicpsr/project/116564) | Medidas corporais masculinas reais (4.082 pessoas) | Público e gratuito |
-| [DeepFashion — CUHK](http://mmlab.ie.cuhk.edu.hk/projects/DeepFashion.html) | Imagens anotadas para treino do YOLOv8 | Acadêmico (requer acordo) |
+| [Roboflow — camisetas-modelagem](https://universe.roboflow.com/emanuel-riceto-pucpr-edu-br/camisetas-modelagem) | Dataset próprio para YOLOv8 (967 imagens, CC BY 4.0) | Público |
 | Hering, Renner, Reserva, C&A, Zara | Size charts coletadas dos sites oficiais | Público |
-| [ABNT NBR 15800](https://www.abnt.org.br) | Norma brasileira de tabelas de tamanho | Pago |
 
-> **Limitação conhecida:** Não existe dataset antropométrico brasileiro público equivalente ao ANSUR II. Os dados masculinos do ANSUR II (militares americanos) foram usados como proxy. Coleta de dados com a população brasileira está planejada como etapa de validação do TCC.
+> **Limitação conhecida:** O ANSUR II é composto por militares americanos adultos. A generalização para a população brasileira será validada com coleta de dados locais com voluntários (etapa planejada).
 
 ---
 
 ## 🛠️ Tecnologias
 
-| Tecnologia | Versão | Uso |
-|---|---|---|
-| Python | 3.10+ | Linguagem principal |
-| SQLite | 3 | Banco de dados |
-| XGBoost | 2.0 | Modelo de recomendação |
-| scikit-learn | 1.4 | Pipeline ML e avaliação |
-| pandas / numpy | — | Manipulação de dados |
-| matplotlib / seaborn | — | Visualizações |
-| FastAPI | 0.111 | API REST *(Fase 4)* |
-| YOLOv8 (Ultralytics) | — | Detecção de camisetas *(Fase 3)* |
-| CUDA (NVIDIA) | — | Aceleração GPU para YOLO *(Fase 3)* |
+| Tecnologia | Versão | Ambiente | Uso |
+|---|---|---|---|
+| Python | 3.13 | venv | Banco de dados, ML tabular, API |
+| Python | 3.11 | venv_yolo | YOLOv8 (compatibilidade PyTorch+CUDA) |
+| SQLite | 3 | — | Banco de dados antropométrico |
+| XGBoost | 2.0 | venv | Modelo de recomendação de tamanho |
+| scikit-learn | 1.4 | venv | Pipeline ML e avaliação |
+| YOLOv8 (Ultralytics) | 8.4 | venv_yolo | Detecção de modelagem em imagens |
+| PyTorch | 2.5.1+cu121 | venv_yolo | Backend CUDA para YOLOv8 |
+| FastAPI | 0.111 | venv | API REST |
+| Uvicorn | 0.29 | venv | Servidor ASGI |
+| pandas / numpy | — | venv | Manipulação de dados |
+| matplotlib / seaborn | — | venv | Visualizações |
+| Roboflow | — | — | Anotação e export do dataset |
+| Git / GitHub | — | — | Controle de versão |
+
+**GPU testada:** NVIDIA GeForce RTX 4060 Ti (8 GB VRAM) · CUDA 12.1 · Driver 591.86
 
 ---
 
-## 👤 Autor
+## 👥 Equipe
 
-**Emanuel Riceto** — [@emanuelriceto](https://github.com/emanuelriceto)
+**Emanuel Riceto da Silva** — [@emanuelriceto](https://github.com/emanuelriceto)
+**Frederico Virmond Fruet**
+
+**Orientador:** Prof. Dr. Julio Cesar Nievola — PUCPR
 
 ---
 
-*Projeto acadêmico (TCC). Os datasets utilizados possuem licenças próprias — consulte os links acima antes de qualquer uso comercial.*
+## 📄 Licença
+
+Projeto acadêmico (TCC). Os datasets utilizados possuem licenças próprias:
+- ANSUR II: uso público para pesquisa acadêmica
+- Dataset Roboflow (camisetas-modelagem): CC BY 4.0
+- Size charts: coletadas dos sites oficiais das marcas para fins acadêmicos
