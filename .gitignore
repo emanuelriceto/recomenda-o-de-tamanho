@@ -32,3 +32,4 @@ desktop.ini
 # === Variáveis de ambiente ===
 .env
 *.log
+data/deepfashion/
