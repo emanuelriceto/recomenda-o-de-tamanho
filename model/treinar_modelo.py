@@ -1,380 +1,312 @@
 """
-FASE 2C — Treinamento do Modelo ML
-TCC: Sistema de Recomendação de Tamanho para Vestuário Superior
+FASE 2C (v2) — Treinamento do modelo de recomendação (XGBoost)
+TCC: Sistema de Recomendação de Tamanho para Vestuário Superior (masculino)
 
-ESCOPO: apenas masculino.
-Modelagens: oversized (0), regular (1), slim (2)
-  — alinhado com data.yaml: ['oversized', 'regular', 'slim']
+MUDANÇAS EM RELAÇÃO À v1
+  • Treino/teste e validação cruzada AGRUPADOS POR PESSOA (StratifiedGroupKFold).
+    Cada pessoa aparece 3× no dataset (uma por modelagem); na v1 a mesma pessoa
+    podia cair no treino e no teste, inflando as métricas.
+  • Métrica "acerto adjacente" (±1 tamanho), alinhada ao critério de aceite.
+  • Pesos de amostra: balanceamento suave por classe + peso extra para perfis
+    extremos (IMC < 16 ou ≥ 40).
+  • Relatório por grupo de IMC e teste de sensibilidade à modelagem.
+  • Ordem das classes lida do dataset (ordem_Hering): novas numerações
+    (ex.: plus size) entram sem alterar código.
+
+Execução:  python model/treinar_modelo.py
 """
-
-import os
 import json
+import sys
 import warnings
+from pathlib import Path
+
 import joblib
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import seaborn as sns
-warnings.filterwarnings('ignore')
+from sklearn.base import clone
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (accuracy_score, classification_report,
+                             confusion_matrix, f1_score)
+from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.utils.class_weight import compute_sample_weight
+from xgboost import XGBClassifier
 
-from sklearn.model_selection  import train_test_split, cross_val_score, StratifiedKFold
-from sklearn.ensemble         import RandomForestClassifier
-from sklearn.linear_model     import LogisticRegression
-from sklearn.preprocessing    import LabelEncoder, StandardScaler
-from sklearn.pipeline         import Pipeline
-from sklearn.metrics          import (classification_report,
-                                       confusion_matrix,
-                                       accuracy_score, f1_score)
-from xgboost                  import XGBClassifier
+warnings.filterwarnings("ignore")
 
-BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
-MODEL_DIR = BASE_DIR
-PLOTS_DIR = os.path.join(BASE_DIR, '../docs/plots')
-os.makedirs(PLOTS_DIR, exist_ok=True)
+RAIZ = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(RAIZ))
+from model.regra_folga import FOLGA  # noqa: E402
 
-sns.set_theme(style='whitegrid', font_scale=1.1)
+MODEL_DIR = RAIZ / "model"
+PLOTS_DIR = RAIZ / "docs" / "plots"
+DATASET = MODEL_DIR / "dataset_treinamento.csv"
 
-# ── Modelagens — ordem exata do data.yaml ────────────────────
-# names: ['oversized', 'regular', 'slim']
-MODELAGEM_MAP = {
-    'oversized': 0,
-    'regular':   1,
-    'slim':      2,
-}
-
-# ── Features ──────────────────────────────────────────────────
-# Sem genero_num — escopo exclusivamente masculino
-FEATURES_PRINCIPAIS = [
-    'busto_circunf',      # circunferência do busto — feature mais importante
-    'largura_ombro',      # distância biacromial
-    'altura',             # altura total
-    'peso_kg',            # peso corporal
-    'imc',                # índice de massa corporal
-    'ratio_busto_ombro',  # proporção busto/ombro
-    'modelagem_num',      # detectada pelo YOLO: 0=oversized, 1=regular, 2=slim
-]
-
-FEATURES_OPCIONAIS = [
-    'cintura_circunf',
-    'comprimento_braco',
-    'ratio_busto_cintura',
-]
-
-MARCA_ALVO = 'Hering'
+MODELAGEM_MAP = {"oversized": 0, "regular": 1, "slim": 2}
+FEATURES_PRINCIPAIS = ["busto_circunf", "largura_ombro", "altura", "peso_kg",
+                       "imc", "ratio_busto_ombro", "modelagem_num"]
+FEATURES_OPCIONAIS = ["cintura_circunf", "comprimento_braco", "ratio_busto_cintura"]
+GRUPOS = ["magreza_extrema", "magreza", "eutrofia", "sobrepeso",
+          "obesidade_I_II", "obesidade_extrema"]
+GRUPOS_EXTREMOS = {"magreza_extrema", "obesidade_extrema"}
+PESO_EXTREMOS = 2.0
+MIN_AMOSTRAS_CLASSE = 30
+MODELO_PREFERIDO = "XGBoost"   # mantido se estiver a < 0,5 p.p. do melhor F1
+SEED = 42
 
 
-def carregar_dataset():
-    path = os.path.join(MODEL_DIR, 'dataset_treinamento.csv')
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            'Dataset não encontrado. Execute: python model/preparar_dados.py'
-        )
-
-    df = pd.read_csv(path)
-
-    if 'tamanho_Hering' not in df.columns:
-        raise ValueError("Coluna 'tamanho_Hering' não encontrada.")
-
-    df = df.dropna(subset=['tamanho_Hering'])
-
-    # Garantir apenas masculino (campo genero pode estar presente em dados antigos)
-    if 'genero' in df.columns:
-        df = df[df['genero'] == 'M'].copy()
-
-    for col in FEATURES_OPCIONAIS:
-        if col in df.columns:
-            df[col] = df[col].fillna(df[col].median())
-
-    print(f'   ✓ {len(df)} amostras masculinas')
-    print(f'   ✓ Modelagens: {df["modelagem"].unique().tolist()}')
-    print(f'   ✓ Distribuição:\n{df["tamanho_Hering"].value_counts().to_string()}')
-    return df
+# ── Dados ─────────────────────────────────────────────────────
+def carregar() -> pd.DataFrame:
+    if not DATASET.exists():
+        sys.exit("dataset_treinamento.csv não encontrado. Execute: python model/preparar_dados.py")
+    df = pd.read_csv(DATASET).dropna(subset=["tamanho_Hering", "ordem_Hering"])
+    for c in FEATURES_OPCIONAIS:
+        if c in df.columns:
+            df[c] = df[c].fillna(df[c].median())
+    cont = df["tamanho_Hering"].value_counts()
+    raras = cont[cont < MIN_AMOSTRAS_CLASSE].index.tolist()
+    if raras:
+        print(f"   ⚠️  Classes com < {MIN_AMOSTRAS_CLASSE} amostras removidas: {raras}")
+        df = df[~df["tamanho_Hering"].isin(raras)]
+    return df.reset_index(drop=True)
 
 
 def preparar_xy(df: pd.DataFrame):
-    features = FEATURES_PRINCIPAIS.copy()
-    for f in FEATURES_OPCIONAIS:
-        if f in df.columns:
-            features.append(f)
-
-    X = df[features].copy()
-
-    # Ordem lógica de tamanhos
-    ordem = ['PP', 'P', 'XS', 'S', 'M', 'G', 'L', 'GG', 'XL', 'XGG', 'XXL', 'EGG', 'XG']
-    classes = [t for t in ordem if t in df['tamanho_Hering'].values]
+    features = FEATURES_PRINCIPAIS + [c for c in FEATURES_OPCIONAIS if c in df.columns]
+    ordem = (df.groupby("tamanho_Hering")["ordem_Hering"].min()
+               .sort_values().index.tolist())
     le = LabelEncoder()
-    le.classes_ = np.array(classes)
-    y = le.transform(df['tamanho_Hering'])
-
-    print(f'\n   Features ({len(features)}): {features}')
-    return X, y, le, features
+    le.classes_ = np.array(ordem, dtype=object)
+    y = le.transform(df["tamanho_Hering"])
+    return df[features].astype(float), y, le, features
 
 
-def treinar_comparar(X, y, le):
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    print(f'\n   Train: {len(X_train)} | Test: {len(X_test)}')
+def calcular_pesos(y, grupos) -> np.ndarray:
+    w = np.sqrt(compute_sample_weight("balanced", y))          # balanceamento suave
+    w *= np.where(np.isin(grupos, list(GRUPOS_EXTREMOS)), PESO_EXTREMOS, 1.0)
+    return w / w.mean()
 
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-    modelos = {
-        'Random Forest': Pipeline([
-            ('clf', RandomForestClassifier(
-                n_estimators=200, max_depth=12,
-                min_samples_leaf=3, random_state=42, n_jobs=-1
-            ))
-        ]),
-        'XGBoost': Pipeline([
-            ('clf', XGBClassifier(
-                n_estimators=200, max_depth=6,
-                learning_rate=0.1, subsample=0.8,
-                eval_metric='mlogloss',
-                random_state=42, verbosity=0
-            ))
-        ]),
-        'Regressão Logística': Pipeline([
-            ('scaler', StandardScaler()),
-            ('clf', LogisticRegression(max_iter=1000, random_state=42))
-        ]),
+# ── Modelos e métricas ────────────────────────────────────────
+def criar_modelos() -> dict:
+    return {
+        "XGBoost": Pipeline([("clf", XGBClassifier(
+            n_estimators=300, max_depth=5, learning_rate=0.08,
+            subsample=0.9, colsample_bytree=0.9, objective="multi:softprob",
+            eval_metric="mlogloss", random_state=SEED, n_jobs=-1, verbosity=0))]),
+        "Random Forest": Pipeline([("clf", RandomForestClassifier(
+            n_estimators=300, min_samples_leaf=3, random_state=SEED, n_jobs=-1))]),
+        "Regressão Logística": Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf", LogisticRegression(max_iter=3000))]),
     }
 
-    resultados = {}
-    melhor_nome = None
-    melhor_f1   = -1
 
-    print(f"\n   {'Modelo':<25} {'Acurácia CV':<16} {'F1 CV':<13} {'F1 Test'}")
-    print('   ' + '-'*65)
-
-    for nome, pipeline in modelos.items():
-        cv_acc = cross_val_score(pipeline, X_train, y_train,
-                                  cv=cv, scoring='accuracy', n_jobs=-1)
-        cv_f1  = cross_val_score(pipeline, X_train, y_train,
-                                  cv=cv, scoring='f1_weighted', n_jobs=-1)
-
-        pipeline.fit(X_train, y_train)
-        y_pred  = pipeline.predict(X_test)
-        f1_test = f1_score(y_test, y_pred, average='weighted')
-        acc_test= accuracy_score(y_test, y_pred)
-
-        resultados[nome] = {
-            'pipeline':    pipeline,
-            'cv_acc':      cv_acc.mean(),
-            'cv_acc_std':  cv_acc.std(),
-            'cv_f1':       cv_f1.mean(),
-            'cv_f1_std':   cv_f1.std(),
-            'f1_test':     f1_test,
-            'acc_test':    acc_test,
-            'y_pred':      y_pred,
-        }
-
-        print(f'   {nome:<25} {cv_acc.mean():.3f} ± {cv_acc.std():.3f}   '
-              f'{cv_f1.mean():.3f} ± {cv_f1.std():.3f}   {f1_test:.3f}')
-
-        if f1_test > melhor_f1:
-            melhor_f1   = f1_test
-            melhor_nome = nome
-
-    print(f'\n   🏆 Melhor: {melhor_nome} (F1={melhor_f1:.3f})')
-    return modelos, resultados, melhor_nome, X_train, X_test, y_train, y_test
+def metricas(y_true, y_pred) -> dict:
+    return {
+        "acuracia": float(accuracy_score(y_true, y_pred)),
+        "f1_ponderado": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
+        "acerto_adjacente": float(np.mean(np.abs(np.asarray(y_true) - np.asarray(y_pred)) <= 1)),
+    }
 
 
-def gerar_graficos(resultados, melhor_nome, X_test, y_test, le, features):
-    print('\n   Gerando gráficos de avaliação...')
+def ajustar(modelo, X, y, w):
+    m = clone(modelo)
+    m.fit(X, y, clf__sample_weight=w)
+    return m
 
-    # Comparação de modelos
-    fig, ax = plt.subplots(figsize=(9, 5))
-    nomes = list(resultados.keys())
-    f1s   = [resultados[n]['f1_test']  for n in nomes]
-    accs  = [resultados[n]['acc_test'] for n in nomes]
-    x     = np.arange(len(nomes)); w = 0.35
-    b1 = ax.bar(x-w/2, accs, w, label='Acurácia', color='#4e9af1', alpha=0.85)
-    b2 = ax.bar(x+w/2, f1s,  w, label='F1-Score',  color='#6cbe6c', alpha=0.85)
-    for bar in list(b1)+list(b2):
-        ax.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.005,
-                f'{bar.get_height():.3f}', ha='center', fontsize=9)
-    ax.set_ylim(0, 1.1); ax.set_xticks(x); ax.set_xticklabels(nomes)
-    ax.set_title('Comparação de Modelos — Masculino (ANSUR II)', fontweight='bold')
+
+def validar_cruzado(modelo, X, y, w, pessoas, n_classes) -> dict:
+    cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=SEED)
+    res = []
+    for tr, va in cv.split(X, y, pessoas):
+        if len(np.unique(y[tr])) < n_classes:   # XGBoost exige todas as classes no treino
+            continue
+        m = ajustar(modelo, X.iloc[tr], y[tr], w[tr])
+        res.append(metricas(y[va], m.predict(X.iloc[va])))
+    return {k: (float(np.mean([r[k] for r in res])), float(np.std([r[k] for r in res])))
+            for k in res[0]}
+
+
+# ── Relatórios ────────────────────────────────────────────────
+def relatorio_grupos(df_te, y_te, y_pred) -> dict:
+    out = {}
+    print(f"\n   {'Grupo IMC':<18} {'n':>6} {'Exato':>8} {'±1 tam.':>8}")
+    for g in GRUPOS:
+        mask = (df_te["grupo_imc"] == g).values
+        if mask.sum() == 0:
+            continue
+        m = metricas(y_te[mask], y_pred[mask])
+        out[g] = {"n": int(mask.sum()), **m}
+        print(f"   {g:<18} {mask.sum():>6} {m['acuracia']:>8.1%} {m['acerto_adjacente']:>8.1%}")
+    return out
+
+
+def sensibilidade_modelagem(df_te, y_pred) -> float:
+    """% de pessoas cujo tamanho previsto muda conforme a modelagem."""
+    piv = (pd.DataFrame({"id": df_te["id"].values, "mod": df_te["modelagem"].values,
+                         "pred": y_pred})
+             .pivot_table(index="id", columns="mod", values="pred"))
+    return float((piv.nunique(axis=1) > 1).mean())
+
+
+def gerar_graficos(resultados, melhor, y_te, y_pred, le):
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    nomes = list(resultados)
+    exato = [resultados[n]["teste"]["acuracia"] for n in nomes]
+    adj = [resultados[n]["teste"]["acerto_adjacente"] for n in nomes]
+    x = np.arange(len(nomes))
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    b1 = ax.bar(x - 0.18, exato, 0.36, label="Acerto exato", color="#2E75B6")
+    b2 = ax.bar(x + 0.18, adj, 0.36, label="Acerto ±1 tamanho", color="#02C39A")
+    for b in list(b1) + list(b2):
+        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.005,
+                f"{b.get_height():.1%}", ha="center", fontsize=9)
+    ax.set_xticks(x)
+    ax.set_xticklabels(nomes)
+    ax.set_ylim(0, 1.1)
+    ax.set_title("Modelos — teste agrupado por pessoa")
     ax.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(PLOTS_DIR, '04_comparacao_modelos.png'), dpi=150)
+    plt.savefig(PLOTS_DIR / "04_comparacao_modelos_v2.png", dpi=150)
     plt.close()
 
-    # Matriz de confusão
-    y_pred  = resultados[melhor_nome]['y_pred']
-    classes = le.classes_
-    cm      = confusion_matrix(y_test, y_pred)
-    cm_pct  = cm.astype(float) / cm.sum(axis=1, keepdims=True) * 100
-    fig, ax = plt.subplots(figsize=(9, 7))
-    sns.heatmap(cm_pct, annot=True, fmt='.1f', cmap='Blues',
-                xticklabels=classes, yticklabels=classes, ax=ax)
-    ax.set_xlabel('Previsto'); ax.set_ylabel('Real')
-    ax.set_title(f'Matriz de Confusão — {melhor_nome} (%)', fontweight='bold')
+    cm = confusion_matrix(y_te, y_pred, labels=range(len(le.classes_)))
+    cm_pct = cm / np.maximum(cm.sum(axis=1, keepdims=True), 1) * 100
+    fig, ax = plt.subplots(figsize=(7, 6))
+    im = ax.imshow(cm_pct, cmap="Blues", vmin=0, vmax=100)
+    ax.set_xticks(range(len(le.classes_)))
+    ax.set_xticklabels(le.classes_, rotation=30)
+    ax.set_yticks(range(len(le.classes_)))
+    ax.set_yticklabels(le.classes_)
+    for i in range(cm_pct.shape[0]):
+        for j in range(cm_pct.shape[1]):
+            ax.text(j, i, f"{cm_pct[i, j]:.0f}", ha="center", va="center",
+                    color="white" if cm_pct[i, j] > 50 else "black", fontsize=8)
+    ax.set_xlabel("Previsto")
+    ax.set_ylabel("Real (regra de folga)")
+    ax.set_title(f"Matriz de confusão (%) — {melhor}")
+    fig.colorbar(im)
     plt.tight_layout()
-    plt.savefig(os.path.join(PLOTS_DIR, '05_matriz_confusao.png'), dpi=150)
+    plt.savefig(PLOTS_DIR / "05_matriz_confusao_v2.png", dpi=150)
     plt.close()
 
-    # Importância das features
-    rf  = resultados['Random Forest']['pipeline'].named_steps['clf']
-    imp = rf.feature_importances_
-    idx = np.argsort(imp)[::-1]
-    fig, ax = plt.subplots(figsize=(10, 5))
-    cores = ['#4e9af1' if i == idx[0] else
-             '#f5c242' if features[i] == 'modelagem_num' else
-             '#aaaaaa' for i in range(len(features))]
-    ax.bar([features[i] for i in idx], imp[idx], color=cores, edgecolor='white')
-    ax.set_title('Importância das Features (Random Forest)\nAmarelo = modelagem_num (saída do YOLO)',
-                 fontweight='bold')
-    ax.tick_params(axis='x', rotation=30)
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLOTS_DIR, '06_importancia_features.png'), dpi=150)
-    plt.close()
 
-    print('   ✓ 3 gráficos salvos')
+def _json(o):
+    if isinstance(o, dict):
+        return {k: _json(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_json(v) for v in o]
+    if isinstance(o, (np.floating, np.integer)):
+        return o.item()
+    return o
 
 
-def salvar_modelo(pipeline, le, features, nome_modelo, resultados):
-    joblib.dump(pipeline, os.path.join(MODEL_DIR, 'modelo_recomendacao.joblib'))
-    joblib.dump(le,       os.path.join(MODEL_DIR, 'label_encoder.joblib'))
-
-    info = {
-        'nome_modelo':       nome_modelo,
-        'marca_referencia':  MARCA_ALVO,
-        'escopo':            'masculino',
-        'features':          features,
-        'classes':           list(le.classes_),
-        'modelagem_map':     MODELAGEM_MAP,
-        'modelagens_yolo':   ['oversized', 'regular', 'slim'],
-        'metricas': {
-            'f1_test':  round(resultados[nome_modelo]['f1_test'],  4),
-            'acc_test': round(resultados[nome_modelo]['acc_test'], 4),
-            'cv_f1':    round(resultados[nome_modelo]['cv_f1'],    4),
-        },
-        'features_principais': FEATURES_PRINCIPAIS,
-        'features_opcionais':  FEATURES_OPCIONAIS,
-    }
-
-    with open(os.path.join(MODEL_DIR, 'modelo_info.json'), 'w',
-              encoding='utf-8') as f:
-        json.dump(info, f, ensure_ascii=False, indent=2)
-
-    print('\n   ✓ modelo_recomendacao.joblib')
-    print('   ✓ label_encoder.joblib')
-    print('   ✓ modelo_info.json')
-
-
-def prever_tamanho(busto_circunf: float, largura_ombro: float,
-                   altura: float, peso_kg: float,
-                   modelagem: str = 'regular',
-                   cintura_circunf: float = None,
-                   comprimento_braco: float = None) -> dict:
-    """
-    Predição de tamanho para cliente MASCULINO.
-
-    Parâmetros:
-      busto_circunf  : circunferência do busto/tórax em cm
-      largura_ombro  : largura entre ombros em cm
-      altura         : altura em cm
-      peso_kg        : peso em kg
-      modelagem      : 'oversized', 'regular' ou 'slim'
-                       (detectada automaticamente pelo YOLO)
-    """
-    pipeline = joblib.load(os.path.join(MODEL_DIR, 'modelo_recomendacao.joblib'))
-    le       = joblib.load(os.path.join(MODEL_DIR, 'label_encoder.joblib'))
-    with open(os.path.join(MODEL_DIR, 'modelo_info.json'),
-              encoding='utf-8') as f:
-        info = json.load(f)
-
-    if modelagem not in MODELAGEM_MAP:
-        raise ValueError(
-            f"Modelagem '{modelagem}' inválida. Use: {list(MODELAGEM_MAP.keys())}"
-        )
-
-    imc      = round(peso_kg / ((altura / 100) ** 2), 1)
-    ratio_bo = round(busto_circunf / largura_ombro, 2)
-    cin_val  = cintura_circunf or (busto_circunf * 0.9)
-    ratio_bc = round(busto_circunf / cin_val, 2)
-    bra_val  = comprimento_braco or (altura * 0.49)
-    mod_num  = MODELAGEM_MAP[modelagem]
-
-    row = {
-        'busto_circunf':      busto_circunf,
-        'largura_ombro':      largura_ombro,
-        'altura':             altura,
-        'peso_kg':            peso_kg,
-        'imc':                imc,
-        'ratio_busto_ombro':  ratio_bo,
-        'modelagem_num':      mod_num,
-        'cintura_circunf':    cin_val,
-        'comprimento_braco':  bra_val,
-        'ratio_busto_cintura':ratio_bc,
-    }
-
-    X     = pd.DataFrame([{f: row[f] for f in info['features']}])
-    proba = pipeline.predict_proba(X)[0]
-    idx   = int(np.argmax(proba))
-
-    top3 = np.argsort(proba)[::-1][:3]
-    return {
-        'tamanho_recomendado': le.classes_[idx],
-        'confianca':           round(float(proba[idx]), 3),
-        'modelagem_usada':     modelagem,
-        'marca_referencia':    info['marca_referencia'],
-        'escopo':              'masculino',
-        'alternativas': [
-            {'tamanho': le.classes_[i],
-             'probabilidade': round(float(proba[i]), 3)}
-            for i in top3
-        ],
-    }
-
-
+# ── Pipeline principal ────────────────────────────────────────
 def treinar_modelo():
-    print('\n' + '='*60)
-    print('  FASE 2C — Treinamento ML (Masculino · oversized/regular/slim)')
-    print('='*60)
+    print("=" * 62)
+    print("  FASE 2C (v2) — Treinamento · divisão agrupada por pessoa")
+    print("=" * 62)
 
-    print('\n[1/5] Carregando dataset...')
-    df = carregar_dataset()
-
-    print('\n[2/5] Preparando features e labels...')
+    df = carregar()
     X, y, le, features = preparar_xy(df)
+    pessoas = df["id"].values
+    grupos = df["grupo_imc"].values
+    w = calcular_pesos(y, grupos)
+    n_cls = len(le.classes_)
+    print(f"\n[1/5] {len(df)} amostras · {df['id'].nunique()} pessoas · classes: {list(le.classes_)}")
+    print(f"      Features ({len(features)}): {features}")
 
-    print('\n[3/5] Treinando e comparando modelos...')
-    modelos, resultados, melhor, X_tr, X_te, y_tr, y_te = \
-        treinar_comparar(X, y, le)
+    # Holdout de ~20% das PESSOAS
+    sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=SEED)
+    tr, te = next(sgkf.split(X, y, pessoas))
+    assert not set(pessoas[tr]) & set(pessoas[te]), "vazamento de pessoas entre treino e teste"
+    print(f"[2/5] Treino: {len(tr)} amostras | Teste: {len(te)} amostras (pessoas distintas)")
 
-    print('\n[4/5] Gerando gráficos...')
-    gerar_graficos(resultados, melhor, X_te, y_te, le, features)
+    print("\n[3/5] Comparando modelos (CV 5-fold agrupado + teste)")
+    print(f"   {'Modelo':<22} {'F1 CV':>14} {'Exato teste':>12} {'±1 teste':>9}")
+    resultados = {}
+    for nome, modelo in criar_modelos().items():
+        cv = validar_cruzado(modelo, X.iloc[tr], y[tr], w[tr], pessoas[tr], n_cls)
+        m = ajustar(modelo, X.iloc[tr], y[tr], w[tr])
+        pred = m.predict(X.iloc[te])
+        resultados[nome] = {"cv": cv, "teste": metricas(y[te], pred), "pred": pred}
+        t = resultados[nome]["teste"]
+        print(f"   {nome:<22} {cv['f1_ponderado'][0]:>7.3f} ±{cv['f1_ponderado'][1]:.3f}"
+              f" {t['acuracia']:>12.1%} {t['acerto_adjacente']:>9.1%}")
 
-    print('\n[5/5] Salvando modelo...')
-    salvar_modelo(resultados[melhor]['pipeline'], le,
-                  features, melhor, resultados)
+    melhor_f1 = max(r["teste"]["f1_ponderado"] for r in resultados.values())
+    melhor = max(resultados, key=lambda n: resultados[n]["teste"]["f1_ponderado"])
+    if melhor_f1 - resultados[MODELO_PREFERIDO]["teste"]["f1_ponderado"] < 0.005:
+        melhor = MODELO_PREFERIDO
+    pred_te = resultados[melhor]["pred"]
+    print(f"\n   🏆 Selecionado: {melhor}")
 
-    m = resultados[melhor]
-    print(f'\n{"="*60}')
-    print(f'  RELATÓRIO FINAL — {melhor}')
-    print(f'{"="*60}')
-    print(f'  Acurácia : {m["acc_test"]:.1%}')
-    print(f'  F1-Score : {m["f1_test"]:.1%}')
-    print(f'  CV F1    : {m["cv_f1"]:.1%} ± {m["cv_f1_std"]:.1%}')
-    print(f'\n  Classification Report:')
-    print(classification_report(y_te, m['y_pred'],
-                                 target_names=le.classes_,
-                                 zero_division=0))
+    print("\n[4/5] Análises no conjunto de teste")
+    df_te = df.iloc[te]
+    por_grupo = relatorio_grupos(df_te, y[te], pred_te)
+    sens = sensibilidade_modelagem(df_te, pred_te)
+    print(f"\n   Modelagem altera o tamanho previsto de {sens:.1%} das pessoas de teste")
+    print("\n" + classification_report(y[te], pred_te, labels=range(n_cls),
+                                       target_names=list(le.classes_), zero_division=0))
+    gerar_graficos(resultados, melhor, y[te], pred_te, le)
 
-    # Testes ao vivo — sem genero, apenas masculino
-    print('='*60)
-    print('  TESTES AO VIVO')
-    print('='*60)
-    for mod in ['regular', 'slim', 'oversized']:
-        r = prever_tamanho(94.0, 43.0, 175.0, 78.0, modelagem=mod)
-        print(f'\n  busto=94 | ombro=43 | h=175 | p=78 | {mod}')
-        print(f'  → {r["tamanho_recomendado"]} (confiança: {r["confianca"]:.1%})')
+    print("[5/5] Treinando modelo final com todos os dados e salvando...")
+    final = ajustar(criar_modelos()[melhor], X, y, w)
+    joblib.dump(final, MODEL_DIR / "modelo_recomendacao.joblib")
+    joblib.dump(le, MODEL_DIR / "label_encoder.joblib")
+    info = {
+        "versao": 2,
+        "nome_modelo": melhor,
+        "marca_referencia": "Hering",
+        "escopo": "masculino",
+        "features": features,
+        "classes": list(le.classes_),
+        "modelagem_map": MODELAGEM_MAP,
+        "regra_folga": FOLGA,
+        "n_amostras": len(df),
+        "n_pessoas": int(df["id"].nunique()),
+        "fontes": df.drop_duplicates("id")["fonte_dataset"].value_counts().to_dict(),
+        "metricas_teste": resultados[melhor]["teste"],
+        "metricas_cv": resultados[melhor]["cv"],
+        "metricas_por_grupo": por_grupo,
+        "sensibilidade_modelagem": sens,
+    }
+    with open(MODEL_DIR / "modelo_info.json", "w", encoding="utf-8") as f:
+        json.dump(_json(info), f, ensure_ascii=False, indent=2)
+    print("   ✓ modelo_recomendacao.joblib · label_encoder.joblib · modelo_info.json")
 
-    print(f'\n✅ Fase 2 concluída!')
-    print('='*60)
+    testes_ao_vivo(final, le, features)
+    print("\n✅ Treinamento concluído.")
 
 
-if __name__ == '__main__':
+def testes_ao_vivo(modelo, le, features):
+    casos = [
+        ("Médio (IMC 25)",        dict(busto_circunf=94,  largura_ombro=43, altura=175, peso_kg=78,  cintura_circunf=84)),
+        ("Fronteira M/G",         dict(busto_circunf=97,  largura_ombro=44, altura=176, peso_kg=82,  cintura_circunf=88)),
+        ("Magreza extrema (IMC 15)", dict(busto_circunf=78, largura_ombro=39, altura=175, peso_kg=46, cintura_circunf=64)),
+        ("Obesidade III (IMC 45)",   dict(busto_circunf=138, largura_ombro=48, altura=175, peso_kg=138, cintura_circunf=145)),
+    ]
+    print("\n   TESTES AO VIVO (tamanho previsto por modelagem)")
+    for nome, m in casos:
+        saida = []
+        for mod, num in MODELAGEM_MAP.items():
+            linha = dict(m)
+            linha["imc"] = m["peso_kg"] / (m["altura"] / 100) ** 2
+            linha["ratio_busto_ombro"] = m["busto_circunf"] / m["largura_ombro"]
+            linha["ratio_busto_cintura"] = m["busto_circunf"] / m["cintura_circunf"]
+            linha["comprimento_braco"] = m["altura"] * 0.49
+            linha["modelagem_num"] = num
+            X = pd.DataFrame([[linha[f] for f in features]], columns=features)
+            p = modelo.predict_proba(X)[0]
+            saida.append(f"{mod}={le.classes_[p.argmax()]} ({p.max():.0%})")
+        print(f"   {nome:<26} " + " · ".join(saida))
+
+
+if __name__ == "__main__":
     treinar_modelo()
