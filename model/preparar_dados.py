@@ -1,259 +1,168 @@
 """
-FASE 2B — Preparação dos Dados para o Modelo de ML
-TCC: Sistema de Recomendação de Tamanho para Vestuário Superior
+FASE 2B (v2) — Preparação dos dados para o XGBoost
+TCC: Sistema de Recomendação de Tamanho para Vestuário Superior (masculino)
 
-ESCOPO: apenas masculino.
-Modelagens YOLO suportadas: oversized (0), regular (1), slim (2)
-  — conforme data.yaml do Roboflow: ['oversized', 'regular', 'slim']
+MUDANÇAS EM RELAÇÃO À v1
+  1. Rótulo gerado pela REGRA DE FOLGA (model/regra_folga.py), que depende da
+     modelagem. Na v1 o rótulo vinha só da faixa de busto corporal, idêntica
+     nas 3 modelagens, e o modelo devolvia o mesmo tamanho para slim, regular
+     e oversized (modelagem_num sem efeito).
+  2. Coluna grupo_imc (faixas da OMS) para avaliar o modelo por perfil corporal.
+  3. Classe SEM_TAMANHO: nenhum tamanho da marca de referência atende à folga
+     mínima (ex.: obesidade grau III).
+
+Execução:  python model/preparar_dados.py
 """
-
 import sqlite3
-import os
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import seaborn as sns
-import warnings
-warnings.filterwarnings('ignore')
 
-BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
-DB_PATH   = os.path.join(BASE_DIR, '../database/antropometrico.db')
-OUT_DIR   = BASE_DIR
-PLOTS_DIR = os.path.join(BASE_DIR, '../docs/plots')
-os.makedirs(OUT_DIR,   exist_ok=True)
-os.makedirs(PLOTS_DIR, exist_ok=True)
+RAIZ = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(RAIZ))
+from model.regra_folga import FOLGA, SEM_TAMANHO, escolher_tamanho  # noqa: E402
 
-sns.set_theme(style='whitegrid', palette='Set2', font_scale=1.1)
+DB_PATH   = RAIZ / "database" / "antropometrico.db"
+SAIDA_CSV = RAIZ / "model" / "dataset_treinamento.csv"
+PLOTS_DIR = RAIZ / "docs" / "plots"
+MARCA_REF = "Hering"
+MODELAGEM_MAP = {"oversized": 0, "regular": 1, "slim": 2}  # ordem do data.yaml
+GRUPOS = ["magreza_extrema", "magreza", "eutrofia", "sobrepeso",
+          "obesidade_I_II", "obesidade_extrema"]
 
-# ── Modelagens — ordem exata do data.yaml do Roboflow ─────────
-# names: ['oversized', 'regular', 'slim']
-MODELAGEM_MAP = {
-    'oversized': 0,
-    'regular':   1,
-    'slim':      2,
-}
 
-CORES_TAMANHO = {
-    'PP':  '#4e9af1', 'P':   '#6cbe6c', 'M':   '#f5c242',
-    'G':   '#f0855a', 'GG':  '#c06ab3', 'XGG': '#888888',
-    'XS':  '#4e9af1', 'S':   '#6cbe6c', 'L':   '#f0855a',
-    'XL':  '#c06ab3', 'XXL': '#888888', 'EGG': '#555555',
-    'XG':  '#999999',
-}
+def grupo_imc(imc: float) -> str:
+    """Faixas de IMC da OMS, agrupadas para análise."""
+    if imc < 16:
+        return "magreza_extrema"      # magreza grau III
+    if imc < 18.5:
+        return "magreza"              # graus I e II
+    if imc < 25:
+        return "eutrofia"
+    if imc < 30:
+        return "sobrepeso"
+    if imc < 40:
+        return "obesidade_I_II"
+    return "obesidade_extrema"        # obesidade grau III
 
 
 def carregar_dados():
-    conn = sqlite3.connect(DB_PATH)
-
-    # Apenas masculino
-    df = pd.read_sql_query("""
-        SELECT id, fonte_dataset, idade,
-               altura, peso_kg, busto_circunf,
-               cintura_circunf, largura_ombro,
-               comprimento_braco, tamanho_inferido
-        FROM medidas_corporais
-        WHERE busto_circunf IS NOT NULL
-          AND altura IS NOT NULL
-          AND genero = 'M'
-    """, conn)
-
-    size_charts = pd.read_sql_query("""
-        SELECT m.nome as marca, t.tamanho_label,
-               t.tamanho_ordem, t.modelagem,
-               t.busto_corpo_min, t.busto_corpo_max,
-               t.largura_ombro as ombro_peca,
-               t.comprimento_total,
-               t.altura_min, t.altura_max
-        FROM tabela_tamanhos t
-        JOIN marcas m ON m.id = t.marca_id
-        WHERE t.modelagem IN ('oversized', 'regular', 'slim')
-        ORDER BY m.nome, t.modelagem, t.tamanho_ordem
-    """, conn)
-
-    conn.close()
-    return df, size_charts
-
-
-def atribuir_tamanho(df: pd.DataFrame, size_charts: pd.DataFrame,
-                     marca: str = 'Hering', modelagem: str = 'regular') -> pd.DataFrame:
-    sc = size_charts[
-        (size_charts['marca'] == marca) &
-        (size_charts['modelagem'] == modelagem)
-    ].copy().sort_values('tamanho_ordem')
-
-    resultados = []
-    for _, pessoa in df.iterrows():
-        busto  = pessoa['busto_circunf']
-        altura = pessoa['altura']
-
-        matches = sc[
-            (sc['busto_corpo_min'] <= busto) &
-            (sc['busto_corpo_max'] >= busto)
-        ]
-
-        if altura and len(matches) > 1:
-            alt_m = matches[
-                (matches['altura_min'] <= altura) &
-                (matches['altura_max'] >= altura)
-            ]
-            if len(alt_m) > 0:
-                matches = alt_m
-
-        if len(matches) == 0:
-            row = sc.iloc[0] if busto < sc['busto_corpo_min'].min() else sc.iloc[-1]
-        else:
-            row = matches.iloc[-1]
-
-        resultados.append({
-            'id':                             pessoa['id'],
-            f'tamanho_Hering_{modelagem}':    row['tamanho_label'],
-            f'ordem_Hering_{modelagem}':      int(row['tamanho_ordem']),
-        })
-
-    return pd.DataFrame(resultados)
+    if not DB_PATH.exists():
+        sys.exit(f"Banco não encontrado: {DB_PATH}. Execute a Fase 1 antes.")
+    with sqlite3.connect(DB_PATH) as con:
+        pessoas = pd.read_sql_query("""
+            SELECT id, fonte_dataset, idade, altura, peso_kg, busto_circunf,
+                   cintura_circunf, largura_ombro, comprimento_braco
+            FROM medidas_corporais
+            WHERE genero = 'M'
+              AND busto_circunf IS NOT NULL AND altura IS NOT NULL
+              AND peso_kg IS NOT NULL AND largura_ombro IS NOT NULL
+        """, con)
+        tabela = pd.read_sql_query("""
+            SELECT t.tamanho_label, t.tamanho_ordem, t.modelagem,
+                   t.largura_busto_min, t.largura_busto_max
+            FROM tabela_tamanhos t JOIN marcas m ON m.id = t.marca_id
+            WHERE m.nome = ? AND t.modelagem IN ('oversized', 'regular', 'slim')
+            ORDER BY t.modelagem, t.tamanho_ordem
+        """, con, params=(MARCA_REF,))
+    if pessoas.empty:
+        sys.exit("Nenhuma medida corporal masculina no banco. Execute load_ansur.py.")
+    if tabela.empty:
+        sys.exit(f"Sem tabela de tamanhos para {MARCA_REF}. Execute size_charts_data.py.")
+    return pessoas, tabela
 
 
 def criar_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df['imc'] = (df['peso_kg'] / ((df['altura'] / 100) ** 2)).round(1)
-    df['ratio_busto_ombro'] = (df['busto_circunf'] / df['largura_ombro']).round(2)
-    df['ratio_busto_cintura'] = np.where(
-        df['cintura_circunf'].notna() & (df['cintura_circunf'] > 0),
-        (df['busto_circunf'] / df['cintura_circunf']).round(2),
-        np.nan
-    )
-    # Sem genero_num — escopo exclusivamente masculino
+    df["imc"] = (df["peso_kg"] / (df["altura"] / 100) ** 2).round(1)
+    df["ratio_busto_ombro"] = (df["busto_circunf"] / df["largura_ombro"]).round(3)
+    df["ratio_busto_cintura"] = np.where(
+        df["cintura_circunf"] > 0,
+        (df["busto_circunf"] / df["cintura_circunf"]).round(3), np.nan)
+    df["grupo_imc"] = df["imc"].apply(grupo_imc)
     return df
 
 
-def expandir_por_modelagem(df: pd.DataFrame,
-                            size_charts: pd.DataFrame) -> pd.DataFrame:
-    """
-    Expande o dataset criando uma linha por modelagem para cada pessoa.
-    Apenas oversized, regular, slim.
-    """
-    linhas = []
-
-    for modelagem, mod_num in MODELAGEM_MAP.items():
-        df_mod = df.copy()
-        df_mod['modelagem']     = modelagem
-        df_mod['modelagem_num'] = mod_num
-
-        tamanhos = atribuir_tamanho(df, size_charts, marca='Hering',
-                                     modelagem=modelagem)
-        col_tam   = f'tamanho_Hering_{modelagem}'
-        col_ordem = f'ordem_Hering_{modelagem}'
-
-        df_mod = df_mod.merge(tamanhos, on='id', how='left')
-        df_mod = df_mod.rename(columns={
-            col_tam:   'tamanho_Hering',
-            col_ordem: 'ordem_Hering',
-        })
-        linhas.append(df_mod)
-
-    return pd.concat(linhas, ignore_index=True)
+def rotular(df: pd.DataFrame, tabela: pd.DataFrame) -> pd.DataFrame:
+    """Uma linha por pessoa × modelagem, com o tamanho dado pela regra de folga."""
+    ordem_sem_tamanho = int(tabela["tamanho_ordem"].max()) + 1
+    blocos = []
+    for modelagem, num in MODELAGEM_MAP.items():
+        tam = tabela[tabela["modelagem"] == modelagem].to_dict("records")
+        ordem = {t["tamanho_label"]: int(t["tamanho_ordem"]) for t in tam}
+        ordem[SEM_TAMANHO] = ordem_sem_tamanho
+        escolhas = [escolher_tamanho(b, c, tam, modelagem)
+                    for b, c in zip(df["busto_circunf"], df["cintura_circunf"])]
+        bloco = df.copy()
+        bloco["modelagem"] = modelagem
+        bloco["modelagem_num"] = num
+        bloco["tamanho_Hering"] = [e.tamanho for e in escolhas]
+        bloco["ordem_Hering"] = bloco["tamanho_Hering"].map(ordem)
+        bloco["folga_cm"] = [e.folga_cm for e in escolhas]
+        bloco["status_folga"] = [e.status for e in escolhas]
+        blocos.append(bloco)
+    return pd.concat(blocos, ignore_index=True)
 
 
-def gerar_graficos(df: pd.DataFrame):
-    print('   Gerando gráficos...')
+def resumir(df: pd.DataFrame):
+    print("\n📊 Tamanho × modelagem (amostras):")
+    print(pd.crosstab(df["tamanho_Hering"], df["modelagem"]).to_string())
 
-    # Gráfico 1: Distribuição de tamanhos por modelagem
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
-    fig.suptitle('Distribuição de Tamanhos por Modelagem — Masculino (Hering)',
-                 fontsize=12, fontweight='bold')
+    piv = df.pivot_table(index="id", columns="modelagem", values="ordem_Hering")
+    muda_slim = (piv["slim"] != piv["regular"]).mean()
+    muda_over = (piv["oversized"] != piv["regular"]).mean()
+    print(f"\n🔎 A modelagem altera o tamanho de {muda_slim:.1%} das pessoas (slim × regular)"
+          f" e de {muda_over:.1%} (oversized × regular).")
+    if muda_slim == 0 and muda_over == 0:
+        print("   ⚠️  Modelagem sem efeito: revise FOLGA em model/regra_folga.py.")
 
-    for ax, modelagem in zip(axes, ['oversized', 'regular', 'slim']):
-        sub = df[df['modelagem'] == modelagem]['tamanho_Hering'].value_counts()
-        ordem = ['PP', 'P', 'M', 'G', 'GG', 'XGG']
-        sub = sub.reindex([t for t in ordem if t in sub.index])
-        cores = [CORES_TAMANHO.get(t, '#aaa') for t in sub.index]
-        ax.bar(sub.index, sub.values, color=cores, edgecolor='white', linewidth=0.8)
-        ax.set_title(modelagem.capitalize(), fontsize=11)
-        ax.set_xlabel('Tamanho')
-        ax.set_ylabel('Nº de indivíduos')
-        for i, v in enumerate(sub.values):
-            ax.text(i, v + 1, str(v), ha='center', fontsize=9)
+    print("\n👥 Pessoas por grupo de IMC (OMS):")
+    cont = df.drop_duplicates("id")["grupo_imc"].value_counts()
+    for g in GRUPOS:
+        print(f"   {g:<18} {int(cont.get(g, 0))}")
 
+
+def gerar_grafico(df: pd.DataFrame):
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    tab = pd.crosstab(df["tamanho_Hering"], df["modelagem"])
+    ordem = df.groupby("tamanho_Hering")["ordem_Hering"].min().sort_values().index
+    tab = tab.reindex(ordem)
+    ax = tab.plot(kind="bar", figsize=(9, 4.5), color=["#f0855a", "#2E75B6", "#c06ab3"])
+    ax.set_xlabel("Tamanho (referência Hering)")
+    ax.set_ylabel("Amostras")
+    ax.set_title("Distribuição de tamanhos por modelagem (regra de folga)")
+    plt.xticks(rotation=0)
     plt.tight_layout()
-    plt.savefig(os.path.join(PLOTS_DIR, '01_distribuicao_por_modelagem.png'),
-                dpi=150, bbox_inches='tight')
+    plt.savefig(PLOTS_DIR / "01_tamanho_por_modelagem_v2.png", dpi=150)
     plt.close()
 
-    # Gráfico 2: Busto × Tamanho por modelagem
-    fig, ax = plt.subplots(figsize=(10, 6))
-    cores_mod = {'regular': '#2E75B6', 'slim': '#c06ab3', 'oversized': '#f0855a'}
-    for modelagem in MODELAGEM_MAP:
-        sub = df[df['modelagem'] == modelagem]
-        ax.scatter(sub['busto_circunf'], sub['ordem_Hering'],
-                   label=modelagem, color=cores_mod[modelagem],
-                   alpha=0.3, s=12)
-    ax.set_xlabel('Circunferência do Busto (cm)')
-    ax.set_ylabel('Ordem do Tamanho (1=menor)')
-    ax.set_title('Busto × Tamanho por Modelagem — Masculino', fontweight='bold')
-    ax.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLOTS_DIR, '02_busto_vs_tamanho_modelagem.png'),
-                dpi=150, bbox_inches='tight')
-    plt.close()
 
-    # Gráfico 3: Correlação
-    cols_corr = ['busto_circunf', 'largura_ombro', 'altura',
-                 'peso_kg', 'imc', 'modelagem_num', 'ordem_Hering']
-    corr = df[cols_corr].corr()
-    fig, ax = plt.subplots(figsize=(8, 6))
-    sns.heatmap(corr, annot=True, fmt='.2f', cmap='coolwarm',
-                center=0, ax=ax, linewidths=0.5,
-                xticklabels=['Busto', 'Ombro', 'Altura', 'Peso',
-                              'IMC', 'Modelagem', 'Tamanho(num)'],
-                yticklabels=['Busto', 'Ombro', 'Altura', 'Peso',
-                              'IMC', 'Modelagem', 'Tamanho(num)'])
-    ax.set_title('Correlação entre Variáveis e Tamanho', fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLOTS_DIR, '03_correlacao.png'),
-                dpi=150, bbox_inches='tight')
-    plt.close()
+def preparar_dados() -> pd.DataFrame:
+    print("=" * 62)
+    print("  FASE 2B (v2) — Preparação dos dados · rótulo por folga")
+    print("=" * 62)
+    pessoas, tabela = carregar_dados()
+    fontes = pessoas["fonte_dataset"].value_counts().to_dict()
+    print(f"\n[1/4] {len(pessoas)} pessoas carregadas · fontes: {fontes}")
 
-    print(f'   ✓ 3 gráficos salvos em docs/plots/')
+    df = criar_features(pessoas)
+    print("[2/4] Features: IMC, ratio busto/ombro, ratio busto/cintura, grupo_imc")
+
+    df = rotular(df, tabela)
+    print(f"[3/4] {len(df)} amostras rotuladas ({df['id'].nunique()} pessoas × 3 modelagens)")
+    print(f"      Parâmetros de folga (cm): {FOLGA}")
+    resumir(df)
+    gerar_grafico(df)
+
+    df.to_csv(SAIDA_CSV, index=False)
+    print(f"\n[4/4] Dataset salvo em {SAIDA_CSV.relative_to(RAIZ)}")
+    return df
 
 
-def preparar_dados():
-    print('\n' + '='*60)
-    print('  FASE 2B — Preparação dos Dados (Masculino · 3 Modelagens)')
-    print('='*60)
-
-    print('\n[1/5] Carregando dados do banco (apenas masculino)...')
-    df, size_charts = carregar_dados()
-    print(f'      ✓ {len(df)} indivíduos masculinos')
-    print(f'      ✓ {len(size_charts)} entradas de size charts (oversized/regular/slim)')
-
-    print('\n[2/5] Criando features derivadas...')
-    df = criar_features(df)
-    print('      ✓ IMC, ratio busto/ombro, ratio busto/cintura')
-
-    print('\n[3/5] Expandindo dataset por modelagem...')
-    df_exp = expandir_por_modelagem(df, size_charts)
-    print(f'      ✓ {len(df_exp)} amostras '
-          f'({len(df)} pessoas × {len(MODELAGEM_MAP)} modelagens)')
-
-    print('\n[4/5] Gerando gráficos...')
-    gerar_graficos(df_exp)
-
-    print('\n[5/5] Salvando dataset de treinamento...')
-    path = os.path.join(OUT_DIR, 'dataset_treinamento.csv')
-    df_exp.to_csv(path, index=False)
-    print(f'      ✓ {path}')
-    print(f'      ✓ {len(df_exp)} linhas × {len(df_exp.columns)} colunas')
-
-    print('\n📋 Features disponíveis:')
-    print('   Medidas:    busto_circunf, largura_ombro, altura, peso_kg')
-    print('   Derivadas:  imc, ratio_busto_ombro')
-    print('   Modelagem:  modelagem_num (0=oversized, 1=regular, 2=slim)')
-    print('   Label:      tamanho_Hering')
-    print('\n✅ Dados prontos para o treino!')
-    print('='*60)
-
-    return df_exp
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     preparar_dados()
