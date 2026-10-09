@@ -34,3 +34,9 @@ desktop.ini
 *.log
 data/deepfashion/
 tests/resultados/
+
+# datasets intermediarios do retreino (imagens nao vao para o git)
+data/deepfashion_v1/
+data/novas_roboflow/
+data/classificar/
+data/novas_3classes/
